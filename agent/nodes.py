@@ -9,8 +9,8 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 # Helpers
 def make_llm():
-    model = "qwen3:1.7b"
-    return ChatOllama(model=model)
+    model = "qwen3:8b"
+    return ChatOllama(model=model, temperature=0.15, num_ctx=8192)
 
 def make_structured_llm() -> Any:
     return make_llm().with_structured_output(Plan)
@@ -20,9 +20,10 @@ def transcribe_node(state: Dict) -> Dict:
     """Simulates STT"""
     print("\n🎤 Input:")
     print("   - subject: ... | to: ... | cc: ... | tone: friendly/formal/neutral")
-    print("   - fix grammar | approve/finalize/finish | add text → gets appended")
+    print("   - precise edits: 'remove second paragraph', 'tone formal', 'to: alice@ex.com'")
     user_text = input("> ").strip()
-    return {"transcript": user_text}
+    if user_text:
+        return {"transcript": user_text}
 
 def intent_node(state: Dict) -> Dict:
     """
@@ -47,19 +48,35 @@ def intent_node(state: Dict) -> Dict:
 
     # System Prompt
     sys = SystemMessage(content=(
-        "You are an assistant that converts user instructions into a STRICT JSON plan "
-        "matching the provided Pydantic schema. "
-        "Only extract information present; if missing, use null. "
-        "Validate emails. No extra commentary—only the JSON structure."
+        "You output a STRICT Plan (Pydantic schema). Rules:\n"
+        "BODY\n"
+        "• Always return a FULL updated body (replace) derived from CURRENT body.\n"
+        "• Apply ONLY the specific changes the user asked for; keep everything else EXACTLY the same.\n"
+        "• Do NOT add disclaimers, warnings, signatures, or boilerplate unless explicitly requested.\n"
+        "• If the user says “reset / start over / rewrite completely”, you may discard the current body.\n"
+        "RECIPIENTS\n"
+        "• Change to/cc ONLY if user explicitly provides emails or uses “to:”/“send to …” or “cc:”/“add cc …”.\n"
+        "• NEVER infer emails from names. NEVER set both to_set and to_add (same for cc).\n"
+        "SUBJECT/TONE\n"
+        "• Modify only if explicitly requested. Do NOT prefix “Re:” unless the user says it is a reply.\n"
+        "NAME\n"
+        "• If the user states their name, include it in the signature and replace “[Your Name]”.\n"
+        "OUTPUT\n"
+        "• Return ONLY the Plan JSON. Use null for fields you are NOT changing."
     ))
 
     # User Prompt
     user = HumanMessage(content=(
-        "Schema: Plan(approve: bool, updates: Updates("
+        "Schema: Plan(updates: Updates("
         "subject?: str|null, to_set?: [EmailStr]|null, to_add?: [EmailStr]|null, "
         "cc_set?: [EmailStr]|null, cc_add?: [EmailStr]|null, tone?: {'friendly'|'formal'|'neutral'}|null, "
-        "body?: BodyPlan(mode: {'replace'|'append'}|null, text?: str|null)"
+        "body?: BodyPlan(mode: 'replace'|null, text?: str|null)"
         "))\n\n"
+        "Apply requested changes MINIMALLY to the CURRENT draft; return the FULL updated body as 'replace'.\n"
+        "If the user says 'reset/start over/rewrite completely', you may produce a fresh body.\n"
+        "If no recipient change is requested, set to_* and cc_* to null.\n"
+        "NEVER set both to_set and to_add (or cc_set and cc_add) at the same time.\n"
+        "Do NOT introduce any disclaimers or boilerplate unless asked.\n\n"
         f"Current Draft: {curr_state}\n\n"
         f"Input: {transcript}"
     ))
@@ -91,15 +108,35 @@ def apply_node(state: Dict) -> Dict:
     cc_set = updates.get("cc_set")
     cc_add = updates.get("cc_add")
 
-    if isinstance(to_set, list):
-        out["to"] = list(dict.fromkeys(to_set))
-    elif isinstance(to_add, list) and to_add:
-        out["to"] = list(dict.fromkeys(curr_to + to_add))
+    def clean_emails(lst):
+        if not isinstance(lst, list):
+            return []
+        cleaned = []
+        for e in lst:
+            if isinstance(e, str):
+                s = e.strip().lower()
+                if EMAIL_RE.fullmatch(s):
+                    cleaned.append(s)
+        # dedupe preserving order
+        return list(dict.fromkeys(cleaned))
+
+    if isinstance(to_add, list) and to_add:
+        cleaned = clean_emails(curr_to + to_add)
+        if cleaned:
+            out["to"] = cleaned
+    elif isinstance(to_set, list):
+        cleaned = clean_emails(to_set)
+        if cleaned:
+            out["to"] = cleaned
     
-    if isinstance(cc_set, list):
-        out["cc"] = list(dict.fromkeys(cc_set))
-    elif isinstance(cc_add, list) and cc_add:
-        out["cc"] = list(dict.fromkeys(curr_cc + cc_add))
+    if isinstance(cc_add, list) and cc_add:
+        cleaned = clean_emails(curr_cc + cc_add)
+        if cleaned:
+            out["cc"] = cleaned
+    elif isinstance(cc_set, list):
+        cleaned = clean_emails(cc_set)
+        if cleaned:
+            out["cc"] = cleaned
 
     # Tone
     tone = updates.get("tone")
@@ -114,42 +151,11 @@ def apply_node(state: Dict) -> Dict:
     if isinstance(text, str) and text.strip():
         if mode == "replace":
             out["body"] = text.strip()
-        elif mode == "append":
-            body = state.get("body", "") or ""
-            out["body"] = (body + ("\n\n" if body else "") + text.strip()).strip()
     
     return out
 
-def critique_node(state: Dict) -> Dict:
-    """
-    Optional light smoothing—only when the body was just modified.
-    (You can also disable it for now by returning {}.)
-    """
-    intent = state.get("intent", {}) or {}
-    body_plan = (intent.get("updates", {}) or {}).get("body") or {}
-    if not body_plan.get("text"):
-        return {}
-    
-    body = state.get("body", "") or ""
-    if not body.strip():
-        return {}
-    
-    llm = make_llm()
-
-    # System Prompt
-    sys = SystemMessage(content=(
-        "Lightly edit the following email for clarity and grammar. "
-        "Preserve meaning and user's voice. Only return the improved body."
-    ))
-
-    # User Prompt
-    user = HumanMessage(content=body)
-
-    improved = llm.invoke([sys, user]).content.strip()
-    return {"body": improved} if improved else {}
-
 def decide_node(state: Dict) -> Dict:
-    intent = state.get("intent", {}) or {}
-    if bool(intent.get("approve", False)):
-        return {"satisfied": True}
-    return {}
+    """MVP: CLI/UX-Decision: 1=continue editing, 2=finished. Needs to be updated for UI."""
+    print("\nAction: [1] continue   [2] exit")
+    choice = input("Choose 1 or 2: ").strip()
+    return {"done": choice == "2"}

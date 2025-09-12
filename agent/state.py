@@ -1,7 +1,6 @@
-from typing import TypedDict, List, Optional
-#from pydantic import BaseModel, Field instead of TypedDict -> test later
+from typing import TypedDict, List, Optional, Dict, Any
 
-class DraftState(TypedDict): # maybe add total=False
+class DraftState(TypedDict):
     """Central, minimal state for the mail draft.
     - body: current email text
     - subject: subject line
@@ -18,7 +17,8 @@ class DraftState(TypedDict): # maybe add total=False
     tone: str
     transcript: str
     last_op: Optional[str]
-    satisfied: bool
+    done: bool
+    intent: Dict[str, Any]
 
 def initial_state() -> DraftState:
     return DraftState(
@@ -29,5 +29,6 @@ def initial_state() -> DraftState:
         tone="neutral",
         transcript="",
         last_op=None,
-        satisfied=False,
+        done=False,
+        intent={}
     )
