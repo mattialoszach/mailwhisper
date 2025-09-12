@@ -13,7 +13,7 @@ def load_model() -> WhisperModel:
     # Defaults:
     # - CPU:  int8  (fast & ok)
     # - CUDA: float16 (fast & good)
-    model_name   = os.getenv("WHISPER_LOCAL_MODEL", "small")
+    model_name   = os.getenv("WHISPER_LOCAL_MODEL", "medium")   # Future: Experiment with "medium" vs "small"
     device       = os.getenv("WHISPER_DEVICE", "cpu").lower()   # "cpu" or "cuda"
     compute_type = os.getenv("WHISPER_COMPUTE", None)
 

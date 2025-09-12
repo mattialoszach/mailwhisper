@@ -4,6 +4,8 @@ from typing import Dict, Any
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from .schema import Plan
+from utils.mic_mem import record_until_enter_mem
+from utils.stt_whisper_mem import transcribe_array
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
@@ -17,12 +19,28 @@ def make_structured_llm() -> Any:
 
 # Nodes
 def transcribe_node(state: Dict) -> Dict:
-    """Simulates STT"""
-    print("\n🎤 Input:")
-    print("   - subject: ... | to: ... | cc: ... | tone: friendly/formal/neutral")
-    print("   - precise edits: 'remove second paragraph', 'tone formal', 'to: alice@ex.com'")
-    user_text = input("> ").strip()
-    if user_text:
+    """Local STT directly in memory (no files)."""
+    print("\n🎤 Recording...")
+    print("   - Press ENTER to stop recording.")
+    
+    try:
+        audio = record_until_enter_mem(samplerate=16000)
+        text, detected_lang = transcribe_array(audio, samplerate=16000)
+        if text:
+            print(f"📝 Transcript ({detected_lang or 'auto'}): {text}")
+            return {"transcript": text}
+        else:
+            print("⚠️ No transcription detected. Please try again or type.")
+            user_text = input("> ").strip()
+            return {"transcript": user_text}
+        
+    except KeyboardInterrupt:
+        print("\n⏹️  Terminated. No recording.")
+        return {"transcript": ""}
+    except Exception as e:
+        print(f"⚠️  STT-Error (offline): {e}")
+        print("\n⌨️  Fallback: Please use Keyboard:")
+        user_text = input("> ").strip()
         return {"transcript": user_text}
 
 def intent_node(state: Dict) -> Dict:
