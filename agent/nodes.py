@@ -134,7 +134,7 @@ def critique_node(state: Dict) -> Dict:
     if not body.strip():
         return {}
     
-    llm = make_llm
+    llm = make_llm()
 
     # System Prompt
     sys = SystemMessage(content=(

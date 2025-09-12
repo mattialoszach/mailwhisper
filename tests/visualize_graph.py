@@ -1,6 +1,7 @@
 from pathlib import Path
 from agent.graph import build_graph
 
+# To Run: uv run -m tests.visualize_graph
 if __name__ == "__main__":
     # Find correct path to save image to
     out_dir = Path(__file__).resolve().parent.parent / "img"

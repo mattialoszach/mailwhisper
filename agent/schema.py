@@ -19,4 +19,4 @@ class Updates(BaseModel):
 
 class Plan(BaseModel):
     approve: bool
-    update: Updates
+    updates: Updates
