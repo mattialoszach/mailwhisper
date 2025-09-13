@@ -2,6 +2,7 @@ from agent.state import initial_state
 from agent.graph import build_graph
 from ui.app import main
 
+# Only for Running with CLI/Debug
 def print_state(state):
     print("\n—— Current Draft ———————————————————")
     if state.get("to"):      print("To:     ", ", ".join(state["to"]))
@@ -19,10 +20,6 @@ def chat_session():
     # To display intermediate states, we use streaming
     state = initial_state()
     for event in app.stream(state, config={"recursion_limit": 300}):
-        #print("---Debug---")
-        #print(event.items())
-        #print("-----------")
-
         node, patch = next(iter(event.items()))
         if isinstance(patch, dict):
             state.update(patch)
@@ -35,7 +32,5 @@ def chat_session():
         print_state(state)
         print("\n—————————————————————————————————————")
 
-
 if __name__ == "__main__":
-    #chat_session() # CLI
     main()

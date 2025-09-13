@@ -29,7 +29,7 @@ class ButtonControlledRecorder:
             dtype="float32",
         )
         self._stream.start()
-        # Hintergrund-Thread sammelt Frames
+        # Background thread collects frames
         def pump():
             while self._running:
                 try:

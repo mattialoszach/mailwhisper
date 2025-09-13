@@ -1,7 +1,7 @@
 import sys
 from typing import Dict, Any
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer
-from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent
+from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush
 from PySide6.QtWidgets import (
 QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
@@ -31,17 +31,17 @@ class ProcessAudioWorker(QObject):
                 self.failed.emit("Keine Transkription erkannt.")
                 return
 
-            # 1) transcript setzen
+            # 1) set transcript
             self.state_snapshot["transcript"] = text
 
-            # 2) intent ermitteln (LLM)
+            # 2) determine intent (LLM)
             patch_intent = intent_node(self.state_snapshot)
             self.state_snapshot.update(patch_intent)  # last_op, intent
 
-            # 3) apply auf Draft
+            # 3) apply to draft
             patch_apply = apply_node(self.state_snapshot)
 
-            # combine: wir geben intent+apply zurück (UI will v.a. apply Felder)
+            # Combine: return intent+apply (UI primarily needs apply fields)
             patch = {}
             patch.update(patch_intent or {})
             patch.update(patch_apply or {})
@@ -61,14 +61,16 @@ class FieldCard(QWidget):
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("cardTitle")
         self.title_lbl.setContentsMargins(0, 2, 0, 0)
-        # Einheitliche Label-Spaltenbreite für konsistente Editor-Breite
+        # Uniform label column width for consistent editor width
         LABEL_COL_WIDTH = 82
         self.title_lbl.setMinimumWidth(LABEL_COL_WIDTH)
 
         self.copy_btn = QPushButton()
         self.copy_btn.setObjectName("copyBtn")
         self.copy_btn.setToolTip("Copy")
-        self.copy_btn.setIcon(QIcon("ui/icons/copy.svg"))
+        self._copy_icon = QIcon("ui/icons/copy.svg")
+        self._check_icon = QIcon("ui/icons/check.svg")
+        self.copy_btn.setIcon(self._copy_icon)
         self.copy_btn.setIconSize(QSize(18, 18))
         self.copy_btn.setText("")
 
@@ -92,6 +94,9 @@ class FieldCard(QWidget):
         grid.setColumnStretch(1, 1)
         outer.addLayout(grid)
 
+        # Connect copy interaction
+        self.copy_btn.clicked.connect(self._on_copy_clicked)
+
     def set_text(self, text: str):
         if isinstance(self.editor, QPlainTextEdit):
             self.editor.setPlainText(text or "")
@@ -106,6 +111,18 @@ class FieldCard(QWidget):
         if isinstance(self.editor, QPlainTextEdit):
             return self.editor.toPlainText()
         return self.editor.text()
+
+    def _on_copy_clicked(self):
+        # Copy current text to clipboard
+        QApplication.clipboard().setText(self.text())
+        # Feedback: swap icon to check for 1.5s
+        self.copy_btn.setIcon(self._check_icon)
+        self.copy_btn.setToolTip("Copied!")
+        QTimer.singleShot(1500, self._restore_copy_icon)
+
+    def _restore_copy_icon(self):
+        self.copy_btn.setIcon(self._copy_icon)
+        self.copy_btn.setToolTip("Copy")
 
 
 class AutoResizingPlainTextEdit(QPlainTextEdit):
@@ -170,7 +187,8 @@ class AutoWrapLabel(QLabel):
         self.setWordWrap(True)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.setContentsMargins(8, 6, 8, 6)
+        # Use zero contents margins; padding is controlled via QSS for consistency
+        self.setContentsMargins(0, 0, 0, 0)
 
     def setText(self, text: str) -> None:
         super().setText(text or "")
@@ -196,11 +214,65 @@ class SettingsDialog(QDialog):
         btns.accepted.connect(self.accept)
         layout.addWidget(btns)
 
+
+class CircleButton(QToolButton):
+    """Small circular button painted manually to guarantee round traffic lights,
+    supports active/inactive state and group-hover darkening.
+    """
+    hoverChanged = Signal(bool)
+
+    def __init__(self, color_hex: str, diameter: int = 14, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._base = QColor(color_hex)
+        self._inactive = QColor("#cfcfcf")
+        self._border = QColor("#dadada")
+        self._diameter = int(diameter)
+        self._active = True
+        self._group_hover = False
+        self.setFixedSize(self._diameter, self._diameter)
+        # Neutralize native styling
+        self.setStyleSheet("QToolButton{background: transparent; border: none; padding:0; margin:0;}")
+        self.setCursor(Qt.ArrowCursor)
+
+    def set_active(self, active: bool):
+        if self._active != active:
+            self._active = active
+            self.update()
+
+    def set_group_hover(self, hov: bool):
+        if self._group_hover != hov:
+            self._group_hover = hov
+            self.update()
+
+    def enterEvent(self, event):
+        self.hoverChanged.emit(True)
+        return super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hoverChanged.emit(False)
+        return super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        color = QColor(self._base if self._active else self._inactive)
+        if self._group_hover:
+            color = color.darker(110)  # ~10% darker
+        p.setBrush(QBrush(color))
+        pen = QPen(self._border)
+        pen.setWidth(0.5)
+        p.setPen(pen)
+        p.drawEllipse(rect)
+        p.end()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MailWhisper")
         self.resize(900, 700)
+        # Minimum window size (adjust here)
+        self.setMinimumSize(560, 520)
         
         # State
         self.state: DraftState = initial_state()
@@ -213,25 +285,23 @@ class MainWindow(QMainWindow):
         top_bar.setContentsMargins(24, 10, 24, 10)
         top_bar.setSpacing(12)
 
-        # macOS-style traffic lights (custom)
-        self.btn_close = QToolButton()
-        self.btn_close.setObjectName("trafficClose")
-        self.btn_close.setFixedSize(14, 14)
-        self.btn_min = QToolButton()
-        self.btn_min.setObjectName("trafficMin")
-        self.btn_min.setFixedSize(14, 14)
-        self.btn_max = QToolButton()
-        self.btn_max.setObjectName("trafficMax")
-        self.btn_max.setFixedSize(14, 14)
+        # macOS-style traffic lights (custom painted circles)
+        self.btn_close = CircleButton("#ff5f57")
+        self.btn_min   = CircleButton("#ffbd2e")
+        self.btn_max   = CircleButton("#28c840")
         traffic_wrap = QWidget()
         traffic_layout = QHBoxLayout(traffic_wrap)
         traffic_layout.setContentsMargins(0, 0, 0, 0)
-        traffic_layout.setSpacing(8)
+        traffic_layout.setSpacing(7)
         traffic_layout.addWidget(self.btn_close)
         traffic_layout.addWidget(self.btn_min)
         traffic_layout.addWidget(self.btn_max)
         traffic_layout.addSpacing(6)
         top_bar.addWidget(traffic_wrap, alignment=Qt.AlignLeft)
+        # Group-hover: when any light is hovered, all darken slightly
+        self._traffic = [self.btn_close, self.btn_min, self.btn_max]
+        for b in self._traffic:
+            b.hoverChanged.connect(lambda s, self=self: self._set_traffic_hover(s))
 
         self.menu_btn = QToolButton()
         self.menu_btn.setObjectName("menuBtn")
@@ -242,7 +312,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.menu_btn, alignment=Qt.AlignLeft)
         top_bar.addSpacing(16)
 
-        self.logo_lbl = QLabel("⛓️✉️ MailWhisper")
+        self.logo_lbl = QLabel("🎙️✉️ MailWhisper")
         font = QFont()
         font.setPointSize(16)
         font.setWeight(QFont.DemiBold)
@@ -281,9 +351,7 @@ class MainWindow(QMainWindow):
         self.card_tone = FieldCard("Tone")
         self.card_body = FieldCard("Body", multiline=True)
 
-        # copy actions
-        for card in (self.card_to, self.card_cc, self.card_subject, self.card_tone, self.card_body):
-            card.copy_btn.clicked.connect(lambda _, c=card: QApplication.clipboard().setText(c.text()))
+        # copy actions handled inside each FieldCard (icon feedback + clipboard)
 
         # Assemble cards
         self.center_layout.addWidget(self.card_to)
@@ -350,15 +418,7 @@ class MainWindow(QMainWindow):
                 border-top-left-radius: 10px;
                 border-top-right-radius: 10px;
             }
-            /* Traffic light buttons */
-            QToolButton#trafficClose, QToolButton#trafficMin, QToolButton#trafficMax {
-                border: 1px solid #dadada;
-                border-radius: 7px;
-                background: #e5e5e5;
-            }
-            QToolButton#trafficClose { background: #ff5f57; border-color: #e0443e; }
-            QToolButton#trafficMin   { background: #ffbd2e; border-color: #e0a722; }
-            QToolButton#trafficMax   { background: #28c840; border-color: #1f9e31; }
+            /* Traffic light buttons drawn via CircleButton painter; no extra styling here */
             QToolButton#menuBtn, QToolButton#settingsBtn { border: none; background: transparent; color: #6b7280; }
             QToolButton#menuBtn:hover, QToolButton#settingsBtn:hover { background: #ececec; border-radius: 4px; color: #1f2937; }
             QLabel { color: #1f2937; }
@@ -381,7 +441,7 @@ class MainWindow(QMainWindow):
                 background: #fff;
                 border: 1px solid #e6e6e6;
                 border-radius: 8px;
-                padding: 12px 12px;
+                padding: 8px 10px; /* match QLineEdit padding (top/bottom 8, left/right 10) */
                 font-size: 14px;
                 color: #1f2937;
             }
@@ -410,6 +470,8 @@ class MainWindow(QMainWindow):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
             QPushButton#copyBtn { padding: 4px; min-width: 32px; min-height: 32px; border-radius: 4px; border: none; background: transparent; color: #6b7280; }
             QPushButton#copyBtn:hover { background: #d9d9d9; color: #1f2937; }
+            QPushButton#copyBtn:pressed { background: #cfcfcf; }
+            QToolTip { background: #ffffff; color: #1f2937; border: 1px solid #e6e6e6; border-radius: 8px; padding: 6px 8px; }
             QPushButton#micBtn {
                 padding: 10px 16px;
                 border-radius: 12px;
@@ -435,6 +497,17 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showMaximized()
+
+    def _set_traffic_hover(self, hovered: bool):
+        for b in getattr(self, '_traffic', []):
+            b.set_group_hover(hovered)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.ActivationChange:
+            active = self.isActiveWindow()
+            for b in getattr(self, '_traffic', []):
+                b.set_active(active)
+        super().changeEvent(event)
 
     def mousePressEvent(self, event):
         try:
@@ -494,11 +567,11 @@ class MainWindow(QMainWindow):
                 print(f"Stop error: {e}", file=sys.stderr)
                 return
 
-            # Worker thread für Transkription + LLM
+            # Worker thread for transcription + LLM
             self.run_processing_worker(audio)
 
     def run_processing_worker(self, audio: np.ndarray):
-        # Button disabled während Verarbeitung
+        # Button disabled during processing
         self.mic_btn.setEnabled(False)
         self.mic_btn.setText("⏳ Processing...")
         self._worker_thread = QThread(self)
@@ -517,7 +590,7 @@ class MainWindow(QMainWindow):
         self._worker_thread.start()
 
     def on_patch_ready(self, patch: Dict[str, Any]):
-        # State aktualisieren
+        # Update state
         self.state.update(patch or {})
         self.refresh_view()
         self.mic_btn.setEnabled(True)
@@ -538,7 +611,7 @@ class MainWindow(QMainWindow):
         self._worker = None
 
     def on_save_clicked(self):
-        # Platzhalter: später Implementierung (Export, Versand, etc.)
+        # Placeholder: implement later (export, sending, etc.)
         self.state["done"] = True
         print("Save clicked — state marked as done.")
 
@@ -563,7 +636,7 @@ class MainWindow(QMainWindow):
 
         # tone
         tone = (self.state.get("tone") or "").strip()
-        # minimalist: tone ausblenden, wenn neutral
+        # Minimalist: hide tone when neutral
         if tone and tone != "neutral":
             self.card_tone.set_text(tone)
             self.card_tone.setVisible(True)
