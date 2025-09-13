@@ -1,12 +1,13 @@
 import sys
 from typing import Dict, Any
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent
-from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, QPropertyAnimation
+from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
 QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
-QDialog, QDialogButtonBox, QSizePolicy
+QDialog, QDialogButtonBox, QSizePolicy, QAbstractButton
 )
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 import numpy as np
 from agent.state import initial_state, DraftState
 from agent.nodes import intent_node, apply_node
@@ -28,7 +29,7 @@ class ProcessAudioWorker(QObject):
             text, detected_lang = transcribe_array(self.audio, samplerate=self.samplerate)
             text = (text or "").strip()
             if not text:
-                self.failed.emit("Keine Transkription erkannt.")
+                self.failed.emit("No Transcription recognized.")
                 return
 
             # 1) set transcript
@@ -406,6 +407,27 @@ class MainWindow(QMainWindow):
         self.apply_styles()
         self.refresh_view()
 
+        # Keyboard shortcut: Space toggles recording (start/stop)
+        self._space_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self._space_shortcut.setContext(Qt.ApplicationShortcut)
+        self._space_shortcut.setAutoRepeat(False)
+        self._space_shortcut.activated.connect(self._on_space_pressed)
+
+        # Intro overlay (subtle rotating messages until first interaction)
+        self._intro_messages = [
+            "Welcome to MailWhisper",
+            "Use SPACE to start recording",
+            "Speak your email idea — we’ll draft it",
+            "Try a tone: friendly, formal, brief",
+            "You can refine later — start talking",
+        ]
+        self._intro_dismissed = False
+        self._setup_intro_overlay()
+        # Global event filter: observe button clicks; do not dismiss on outside focus changes
+        QApplication.instance().installEventFilter(self)
+        # Also watch the scroll viewport for resize so overlay stays perfectly centered
+        self.scroll_area.viewport().installEventFilter(self)
+
     # ------- Styling -------
     def apply_styles(self):
         self.setStyleSheet("""
@@ -489,6 +511,11 @@ class MainWindow(QMainWindow):
                 color: #1f2937;
                 border: 1px solid #e6e6e6;
             }
+            QLabel#introOverlay {
+                background: transparent;
+                color: #c8c8c8; /* subtle vs #f0f0f0 background */
+                font-size: 22px;
+            }
         """)
 
     # ---- Frameless window helpers ----
@@ -535,6 +562,99 @@ class MainWindow(QMainWindow):
     def show_settings(self):
         dlg = SettingsDialog(self)
         dlg.exec()
+
+    def _on_space_pressed(self):
+        # Respect disabled state while processing
+        if not self.mic_btn.isEnabled():
+            return
+        self.dismiss_intro()
+        self.toggle_recording()
+
+    # ----- Intro overlay helpers -----
+    def _setup_intro_overlay(self):
+        if self._intro_dismissed:
+            return
+        # Overlay label is parented to the scroll area's viewport to stay centered
+        vp = self.scroll_area.viewport()
+        self._intro_label = QLabel(vp)
+        self._intro_label.setObjectName("introOverlay")
+        self._intro_label.setWordWrap(True)
+        self._intro_label.setAlignment(Qt.AlignCenter)
+        self._intro_label.setText("")
+        self._intro_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._sync_intro_geometry()
+        # Typing animation state and timers
+        self._intro_index = 0
+        self._typed_pos = 0
+        self._typing_timer = QTimer(self)
+        self._typing_timer.timeout.connect(self._advance_typing)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._next_message)
+        self._intro_label.show()
+        # Kick off first typing cycle
+        QTimer.singleShot(0, self._start_typing_cycle)
+
+    def _start_typing_cycle(self):
+        if self._intro_dismissed:
+            return
+        self._current_text = self._intro_messages[self._intro_index]
+        self._typed_pos = 0
+        self._intro_label.setText("")
+        # Compute per-char interval to finish around 0.5s, with a lower bound for readability
+        total_ms = 500
+        n = max(1, len(self._current_text))
+        per_char = max(18, int(total_ms / n))
+        self._typing_timer.start(per_char)
+
+    def _advance_typing(self):
+        if self._intro_dismissed:
+            self._typing_timer.stop()
+            return
+        self._typed_pos += 1
+        self._intro_label.setText(self._current_text[: self._typed_pos])
+        if self._typed_pos >= len(self._current_text):
+            # Done typing: hold for 3s, then next
+            self._typing_timer.stop()
+            self._hold_timer.start(3000)
+
+    def _next_message(self):
+        if self._intro_dismissed:
+            return
+        self._intro_index = (self._intro_index + 1) % len(self._intro_messages)
+        self._start_typing_cycle()
+
+    def dismiss_intro(self):
+        if self._intro_dismissed:
+            return
+        self._intro_dismissed = True
+        try:
+            self._typing_timer.stop()
+            self._hold_timer.stop()
+        except Exception:
+            pass
+        if hasattr(self, "_intro_label") and self._intro_label:
+            self._intro_label.hide()
+
+    def resizeEvent(self, event):
+        # Keep the overlay sized to the center area
+        super().resizeEvent(event)
+        self._sync_intro_geometry()
+
+    def _sync_intro_geometry(self):
+        if hasattr(self, "_intro_label") and self._intro_label and not self._intro_dismissed:
+            vp = self.scroll_area.viewport()
+            self._intro_label.setGeometry(vp.rect())
+
+    def eventFilter(self, obj, event):
+        # Dismiss only when a button within the app is clicked, not on focus changes
+        if (not self._intro_dismissed and event.type() == QEvent.MouseButtonPress
+            and isinstance(obj, QAbstractButton)):
+            self.dismiss_intro()
+        # Keep overlay centered when the scroll viewport resizes
+        if obj is self.scroll_area.viewport() and event.type() == QEvent.Resize:
+            self._sync_intro_geometry()
+        return super().eventFilter(obj, event)
 
     def toggle_recording(self):
         if not self._recording:
