@@ -1,5 +1,6 @@
 from agent.state import initial_state
 from agent.graph import build_graph
+from ui.app import main
 
 def print_state(state):
     print("\n—— Current Draft ———————————————————")
@@ -36,4 +37,5 @@ def chat_session():
 
 
 if __name__ == "__main__":
-    chat_session()
+    #chat_session() # CLI
+    main()

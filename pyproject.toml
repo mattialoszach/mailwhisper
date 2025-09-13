@@ -13,5 +13,6 @@ dependencies = [
     "langgraph>=0.6.7",
     "numpy>=2.3.3",
     "pydantic>=2.11.7",
+    "pyside6>=6.9.2",
     "sounddevice>=0.5.2",
 ]
