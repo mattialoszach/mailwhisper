@@ -49,6 +49,34 @@ class ButtonControlledRecorder:
                 self._stream.close()
         finally:
             self._stream = None
+        # Ensure background pump thread terminates cleanly
+        try:
+            t = getattr(self, "_pump_thread", None)
+            if t is not None and t.is_alive():
+                t.join(timeout=0.5)
+        except Exception:
+            pass
+        self._pump_thread = None
         if not self._chunks:
             raise RuntimeError("No audio recorded.")
         return np.concatenate(self._chunks, axis=0)
+
+    def shutdown(self):
+        """Forcefully stop and release all audio resources and join threads.
+        Safe to call multiple times and from close handlers.
+        """
+        try:
+            self._running = False
+            try:
+                if self._stream:
+                    self._stream.stop()
+                    self._stream.close()
+            finally:
+                self._stream = None
+            t = getattr(self, "_pump_thread", None)
+            if t is not None and t.is_alive():
+                t.join(timeout=0.5)
+        except Exception:
+            pass
+        finally:
+            self._pump_thread = None

@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, 
 from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
 QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
+QLineEdit, QPlainTextEdit, QTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
 QDialog, QDialogButtonBox, QSizePolicy, QAbstractButton
 )
 from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -23,6 +23,10 @@ class ProcessAudioWorker(QObject):
         self.audio = audio
         self.samplerate = samplerate
         self.state_snapshot = dict(state)  # shallow copy
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         try:
@@ -31,16 +35,25 @@ class ProcessAudioWorker(QObject):
             if not text:
                 self.failed.emit("No Transcription recognized.")
                 return
+            if self._cancelled:
+                self.finished.emit({})
+                return
 
             # 1) set transcript
             self.state_snapshot["transcript"] = text
 
             # 2) determine intent (LLM)
-            patch_intent = intent_node(self.state_snapshot)
+            if self._cancelled:
+                patch_intent = {}
+            else:
+                patch_intent = intent_node(self.state_snapshot)
             self.state_snapshot.update(patch_intent)  # last_op, intent
 
             # 3) apply to draft
-            patch_apply = apply_node(self.state_snapshot)
+            if self._cancelled:
+                patch_apply = {}
+            else:
+                patch_apply = apply_node(self.state_snapshot)
 
             # Combine: return intent+apply (UI primarily needs apply fields)
             patch = {}
@@ -82,7 +95,8 @@ class FieldCard(QWidget):
         grid.setVerticalSpacing(0)
 
         if multiline:
-            self.editor = AutoWrapLabel()
+            # Use auto-resizing QTextEdit (wraps, no inner scrollbars)
+            self.editor = AutoResizingTextEdit(min_height=60)
             self.editor.setObjectName("bodyText")
         else:
             self.editor = QLineEdit()
@@ -99,19 +113,27 @@ class FieldCard(QWidget):
         self.copy_btn.clicked.connect(self._on_copy_clicked)
 
     def set_text(self, text: str):
-        if isinstance(self.editor, QPlainTextEdit):
-            self.editor.setPlainText(text or "")
-            if isinstance(self.editor, AutoResizingPlainTextEdit):
-                QTimer.singleShot(0, self.editor.update_height)
-        elif isinstance(self.editor, AutoWrapLabel):
-            self.editor.setText(text or "")
+        e = self.editor
+        t = text or ""
+        # Prefer setPlainText when available (QTextEdit/QPlainTextEdit)
+        if hasattr(e, "setPlainText") and not isinstance(e, QLineEdit):
+            e.setPlainText(t)
         else:
-            self.editor.setText(text or "")
+            e.setText(t)
+        # Trigger height recompute for auto-resizing widgets
+        if hasattr(e, "update_height"):
+            QTimer.singleShot(0, e.update_height)
 
     def text(self) -> str:
-        if isinstance(self.editor, QPlainTextEdit):
-            return self.editor.toPlainText()
-        return self.editor.text()
+        # Prefer plain text if available (covers QTextEdit/QPlainTextEdit)
+        try:
+            if hasattr(self.editor, "toPlainText") and not isinstance(self.editor, QLineEdit):
+                return self.editor.toPlainText()
+            if hasattr(self.editor, "text"):
+                return self.editor.text()
+        except Exception:
+            pass
+        return ""
 
     def _on_copy_clicked(self):
         # Copy current text to clipboard
@@ -180,6 +202,50 @@ class AutoResizingPlainTextEdit(QPlainTextEdit):
         event.ignore()
 
 
+class AutoResizingTextEdit(QTextEdit):
+    """Read-only QTextEdit that wraps to widget width and auto-resizes
+    to its content height. No inner scrollbars; outer scroll handles scrolling.
+    """
+    def __init__(self, min_height: int = 60, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._min_height = min_height
+        self.setReadOnly(True)
+        self.setAcceptRichText(False)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        # Signals to react on content/size changes
+        self.textChanged.connect(self.update_height)
+        try:
+            self.document().documentLayout().documentSizeChanged.connect(lambda _=None: self.update_height())
+        except Exception:
+            pass
+        QTimer.singleShot(0, self.update_height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Match text width to viewport width for correct wrapping height
+        self.document().setTextWidth(self.viewport().width())
+        self.update_height()
+
+    def update_height(self):
+        vw = self.viewport().width()
+        if vw <= 0:
+            vw = max(0, self.width() - self.frameWidth() * 2 - 4)
+        self.document().setTextWidth(vw)
+        layout = self.document().documentLayout()
+        doc_size = layout.documentSize()
+        h = max(self._min_height, int(doc_size.height()) + self.frameWidth() * 2 + 2)
+        self.setMinimumHeight(h)
+        self.setMaximumHeight(h)
+        self.updateGeometry()
+
+    def wheelEvent(self, event):
+        # Avoid inner scrolling; let outer scroll area handle it
+        event.ignore()
+
 class AutoWrapLabel(QLabel):
     """A selectable, word-wrapping label that grows with its content and never
     shows inner scrollbars. Lets the outer scroll area handle scrolling."""
@@ -200,10 +266,18 @@ class AutoWrapLabel(QLabel):
         QTimer.singleShot(0, self._adjust_height)
 
     def _adjust_height(self):
-        sh = self.sizeHint()
-        h = max(60, sh.height())
+        # Compute height based on the current available width for proper wrapping
+        w = self.width()
+        if w <= 0 and self.parent() is not None:
+            w = max(0, self.parent().width() - 16)
+        if w <= 0:
+            w = self.sizeHint().width()
+        # QLabel provides heightForWidth when wordWrap is enabled
+        h_text = self.heightForWidth(w) if self.wordWrap() else self.sizeHint().height()
+        h = max(60, h_text)
         self.setMinimumHeight(h)
         self.setMaximumHeight(h)
+        self.updateGeometry()
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -368,6 +442,15 @@ class MainWindow(QMainWindow):
         bottom.setContentsMargins(16, 12, 16, 12)
         bottom.setSpacing(12)
 
+        # New draft button (bottom-left)
+        self.new_btn = QToolButton()
+        self.new_btn.setObjectName("newBtn")
+        self.new_btn.setToolTip("New Draft")
+        self.new_btn.setFixedSize(40, 40)
+        self.new_btn.setIcon(QIcon("ui/icons/badge-plus.svg"))
+        self.new_btn.setIconSize(QSize(20, 20))
+        self.new_btn.clicked.connect(self.on_new_draft_clicked)
+
         self.mic_btn = QPushButton("🎤  Record")
         self.mic_btn.setObjectName("micBtn")
         self.mic_btn.clicked.connect(self.toggle_recording)
@@ -378,6 +461,7 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.on_save_clicked)
         self.save_btn.setFixedWidth(100)
 
+        bottom.addWidget(self.new_btn)
         bottom.addStretch(1)
         bottom.addWidget(self.mic_btn)
         bottom.addWidget(self.save_btn)
@@ -457,7 +541,7 @@ class MainWindow(QMainWindow):
                 padding-top: 10px;
             }
             QWidget#card { background: #ffffff; border: 1px solid #e6e6e6; border-radius: 10px; }
-            QLineEdit, QPlainTextEdit { background: #fff; border: 1px solid #e6e6e6; border-radius: 8px; padding: 8px 10px; font-size: 14px; color: #1f2937; }
+            QLineEdit, QPlainTextEdit, QTextEdit { background: #fff; border: 1px solid #e6e6e6; border-radius: 8px; padding: 8px 10px; font-size: 14px; color: #1f2937; }
             /* Body text styled like the input fields */
             QLabel#bodyText {
                 background: #fff;
@@ -511,6 +595,8 @@ class MainWindow(QMainWindow):
                 color: #1f2937;
                 border: 1px solid #e6e6e6;
             }
+            QToolButton#newBtn { border: none; background: transparent; color: #6b7280; padding: 6px; border-radius: 8px; }
+            QToolButton#newBtn:hover { background: #ececec; color: #1f2937; }
             QLabel#introOverlay {
                 background: transparent;
                 color: #c8c8c8; /* subtle vs #f0f0f0 background */
@@ -664,6 +750,9 @@ class MainWindow(QMainWindow):
             self.mic_btn.setProperty("recording", True)
             self.mic_btn.style().unpolish(self.mic_btn)
             self.mic_btn.style().polish(self.mic_btn)
+            # Avoid resetting while recording
+            if hasattr(self, 'new_btn'):
+                self.new_btn.setEnabled(False)
             try:
                 self.recorder.start()
             except Exception as e:
@@ -673,6 +762,8 @@ class MainWindow(QMainWindow):
                 self.mic_btn.style().unpolish(self.mic_btn)
                 self.mic_btn.style().polish(self.mic_btn)
                 print(f"Audio error: {e}", file=sys.stderr)
+                if hasattr(self, 'new_btn'):
+                    self.new_btn.setEnabled(True)
         else:
             # Stop and process
             self._recording = False
@@ -707,6 +798,9 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self._worker_thread.quit)
         self._worker.failed.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._on_thread_finished)
+        # Prevent starting a fresh draft during processing
+        if hasattr(self, 'new_btn'):
+            self.new_btn.setEnabled(False)
         self._worker_thread.start()
 
     def on_patch_ready(self, patch: Dict[str, Any]):
@@ -715,11 +809,15 @@ class MainWindow(QMainWindow):
         self.refresh_view()
         self.mic_btn.setEnabled(True)
         self.mic_btn.setText("🎤  Record")
+        if hasattr(self, 'new_btn'):
+            self.new_btn.setEnabled(True)
 
     def on_processing_failed(self, msg: str):
         print(f"Processing failed: {msg}", file=sys.stderr)
         self.mic_btn.setEnabled(True)
         self.mic_btn.setText("🎤  Record")
+        if hasattr(self, 'new_btn'):
+            self.new_btn.setEnabled(True)
 
     def _on_thread_finished(self):
         # Drop references so GC can clean up
@@ -734,6 +832,81 @@ class MainWindow(QMainWindow):
         # Placeholder: implement later (export, sending, etc.)
         self.state["done"] = True
         print("Save clicked — state marked as done.")
+
+    def on_new_draft_clicked(self):
+        """Reset the UI to a fresh DraftState and restore recording UI."""
+        # If processing is running, cancel and perform reset once finished
+        if getattr(self, "_worker_thread", None) is not None and self._worker_thread.isRunning():
+            try:
+                if getattr(self, "_worker", None) is not None:
+                    # Ask worker to cancel further work
+                    try:
+                        self._worker.cancel()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Disable actions while waiting
+            self.mic_btn.setEnabled(False)
+            if hasattr(self, 'new_btn'):
+                self.new_btn.setEnabled(False)
+            # Once the worker thread finishes, complete reset
+            def _after():
+                self._reset_to_new_draft()
+            self._worker_thread.finished.connect(_after)
+            return
+
+        # If currently recording, stop stream and discard frames
+        if self._recording:
+            try:
+                self.recorder.stop()
+            except Exception:
+                pass
+            self._recording = False
+
+        self._reset_to_new_draft()
+
+    def _reset_to_new_draft(self):
+        self.mic_btn.setEnabled(True)
+        self.mic_btn.setText("🎤  Record")
+        self.mic_btn.setProperty("recording", False)
+        self.mic_btn.style().unpolish(self.mic_btn)
+        self.mic_btn.style().polish(self.mic_btn)
+        if hasattr(self, 'new_btn'):
+            self.new_btn.setEnabled(True)
+        # Reset application state and UI
+        self.state = initial_state()
+        self.refresh_view()
+
+    # ---- Graceful shutdown on app close ----
+    def closeEvent(self, event):
+        try:
+            # Cancel running worker if any
+            if getattr(self, "_worker_thread", None) is not None and self._worker_thread.isRunning():
+                try:
+                    if getattr(self, "_worker", None) is not None:
+                        try:
+                            self._worker.cancel()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    self._worker_thread.quit()
+                except Exception:
+                    pass
+                # Wait briefly for clean exit
+                try:
+                    self._worker_thread.wait(3000)
+                except Exception:
+                    pass
+        finally:
+            # Ensure audio resources are released
+            try:
+                self.recorder.shutdown()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     # ------- View Binding -------
     def refresh_view(self):
