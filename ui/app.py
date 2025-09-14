@@ -355,6 +355,65 @@ class SoftToolTip(QWidget):
         finally:
             p.end()
 
+
+class Spinner(QWidget):
+    """Tiny, smooth progress spinner (indeterminate)."""
+    def __init__(self, parent=None, diameter: int = 14, line_width: int = 2, color: QColor | str = "#ffffff"):
+        super().__init__(parent)
+        self._diam = int(diameter)
+        self._lw = int(line_width)
+        self._color = QColor(color)
+        self._angle = 0
+        self.setFixedSize(self._diam, self._diam)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.setInterval(16)  # ~60 FPS for smoothness
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self):
+        if self._timer.isActive():
+            self._timer.stop()
+        self.hide()
+
+    def _tick(self):
+        self._angle = (self._angle + 6) % 360  # 60fps * 6deg = full rotation in 1s
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.translate(self.width() / 2, self.height() / 2)
+            p.rotate(self._angle)
+            pen = QPen(self._color)
+            pen.setWidth(self._lw)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            r = (min(self.width(), self.height()) - self._lw) / 2.0
+            # Draw 280-degree arc to create a gap
+            start_angle = 0
+            span_angle = 280
+            # Convert to radians along circle via incremental lines for simplicity
+            path = QPainterPath()
+            from math import cos, sin, radians
+            steps = 40
+            for i in range(steps + 1):
+                a = radians(start_angle + span_angle * (i / steps))
+                x = r * cos(a)
+                y = r * sin(a)
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            p.drawPath(path)
+        finally:
+            p.end()
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -535,6 +594,11 @@ class MainWindow(QMainWindow):
         self.mic_btn.setObjectName("micBtn")
         self.mic_btn.clicked.connect(self.toggle_recording)
         self.mic_btn.setFixedWidth(140)  # keep width stable across text changes
+        self._mic_btn_base_width = 140
+        # Processing overlay container (created on demand)
+        self._proc_container = None
+        self._mic_spinner = None
+        self.mic_btn.installEventFilter(self)
 
         self.save_btn = QPushButton("💾  Save")
         self.save_btn.setObjectName("saveBtn")
@@ -667,8 +731,18 @@ class MainWindow(QMainWindow):
                 color: white;
                 border: none;
             }
+            QPushButton#micBtn:hover { background: #2b3647; }
             QPushButton#micBtn[recording="true"] {
                 background: #e53935;
+            }
+            QPushButton#micBtn[recording="true"]:hover {
+                background: #e53935;
+            }
+            /* Processing state: orange with pulse animation handled in code */
+            QPushButton#micBtn[processing="true"],
+            QPushButton#micBtn:disabled[processing="true"] {
+                background: #f59e0b; /* orange */
+                color: white;
             }
             QPushButton#saveBtn {
                 padding: 10px 16px;
@@ -677,6 +751,7 @@ class MainWindow(QMainWindow):
                 color: #1f2937;
                 border: 1px solid #e6e6e6;
             }
+            QPushButton#saveBtn:hover { background: #e7e7e7; }
             QToolButton#newBtn { border: none; background: transparent; color: #6b7280; padding: 6px; border-radius: 8px; }
             QToolButton#newBtn:hover { background: #ececec; color: #1f2937; }
             QLabel#introOverlay {
@@ -815,9 +890,10 @@ class MainWindow(QMainWindow):
             self._intro_label.setGeometry(vp.rect())
 
     def eventFilter(self, obj, event):
-        # Dismiss only when a button within the app is clicked, not on focus changes
-        if (not getattr(self, '_intro_dismissed', True) and event.type() == QEvent.MouseButtonPress
-            and isinstance(obj, QAbstractButton)):
+        # Dismiss only when the Record button is clicked (not other buttons)
+        if (not getattr(self, '_intro_dismissed', True)
+            and event.type() == QEvent.MouseButtonPress
+            and obj is getattr(self, 'mic_btn', None)):
             self.dismiss_intro()
         # Keep overlay centered when the scroll viewport resizes
         if obj is self.scroll_area.viewport() and event.type() == QEvent.Resize:
@@ -835,6 +911,9 @@ class MainWindow(QMainWindow):
                 if hasattr(self, '_new_tip_timer'):
                     self._new_tip_timer.stop()
                 self._soft_tip.hide()
+        # Button resize: layout will keep overlay centered; ensure size hint is updated
+        if obj is getattr(self, 'mic_btn', None) and event.type() == QEvent.Resize:
+            self._center_proc_container()
         return super().eventFilter(obj, event)
 
     def _show_soft_tip(self, text: str):
@@ -843,6 +922,44 @@ class MainWindow(QMainWindow):
         try:
             self._soft_tip.setText(text)
             self._soft_tip.showNear(self.new_btn, above=True, y_offset=10)
+        except Exception:
+            pass
+
+    def _ensure_proc_container(self):
+        if self._proc_container is not None:
+            return
+        try:
+            # Container with spinner + label
+            cont = QWidget(self.mic_btn)
+            lay = QHBoxLayout(cont)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+            sp = Spinner(cont, diameter=16, line_width=2, color="#ffffff")
+            lbl = QLabel("Processing...", cont)
+            lbl.setStyleSheet("color: #ffffff;")
+            lay.addWidget(sp)
+            lay.addWidget(lbl)
+            cont.adjustSize()
+
+            # Put the container centered inside the button using a layout on the button itself
+            if not hasattr(self, "_mic_btn_layout") or self._mic_btn_layout is None:
+                self._mic_btn_layout = QHBoxLayout(self.mic_btn)
+                self._mic_btn_layout.setContentsMargins(0, 0, 0, 0)
+                self._mic_btn_layout.setSpacing(0)
+                self._mic_btn_layout.setAlignment(Qt.AlignCenter)
+            self._mic_btn_layout.addWidget(cont, 0, Qt.AlignCenter)
+
+            self._proc_container = cont
+            self._mic_spinner = sp
+        except Exception:
+            self._proc_container = None
+            self._mic_spinner = None
+
+    def _center_proc_container(self):
+        # Layout on the button keeps it centered; ensure preferred size is current
+        try:
+            if self._proc_container:
+                self._proc_container.adjustSize()
         except Exception:
             pass
 
@@ -886,9 +1003,8 @@ class MainWindow(QMainWindow):
             self.run_processing_worker(audio)
 
     def run_processing_worker(self, audio: np.ndarray):
-        # Button disabled during processing
-        self.mic_btn.setEnabled(False)
-        self.mic_btn.setText("⏳ Processing...")
+        # Button enters processing state and becomes disabled
+        self._set_mic_processing(True)
         self._worker_thread = QThread(self)
         # Keep a strong reference so Python GC doesn't collect the worker
         self._worker = ProcessAudioWorker(audio, 16000, self.state)
@@ -911,15 +1027,13 @@ class MainWindow(QMainWindow):
         # Update state
         self.state.update(patch or {})
         self.refresh_view()
-        self.mic_btn.setEnabled(True)
-        self.mic_btn.setText("🎤  Record")
+        self._set_mic_processing(False)
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
 
     def on_processing_failed(self, msg: str):
         print(f"Processing failed: {msg}", file=sys.stderr)
-        self.mic_btn.setEnabled(True)
-        self.mic_btn.setText("🎤  Record")
+        self._set_mic_processing(False)
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
 
@@ -931,6 +1045,46 @@ class MainWindow(QMainWindow):
             pass
         self._worker_thread = None
         self._worker = None
+
+    def _set_mic_processing(self, on: bool):
+        if on:
+            self.mic_btn.setEnabled(False)
+            # Text moved into overlay for perfect centering
+            self.mic_btn.setText("")
+            self.mic_btn.setProperty("processing", True)
+            self.mic_btn.style().unpolish(self.mic_btn)
+            self.mic_btn.style().polish(self.mic_btn)
+            self._ensure_proc_container()
+            self._center_proc_container()
+            if self._mic_spinner:
+                self._mic_spinner.start()
+            if self._proc_container:
+                self._proc_container.show()
+                # Ensure button is wide enough for spinner + label
+                try:
+                    self._proc_container.adjustSize()
+                    required = self._proc_container.width() + 20  # small side padding
+                    if required > self.mic_btn.width():
+                        self.mic_btn.setFixedWidth(required)
+                        self._center_proc_container()
+                except Exception:
+                    pass
+        else:
+            if self._mic_spinner:
+                self._mic_spinner.stop()
+            if self._proc_container:
+                self._proc_container.hide()
+            self.mic_btn.setEnabled(True)
+            self.mic_btn.setText("🎤  Record")
+            self.mic_btn.setProperty("processing", False)
+            self.mic_btn.style().unpolish(self.mic_btn)
+            self.mic_btn.style().polish(self.mic_btn)
+            # Restore baseline width to keep layout consistent
+            try:
+                if getattr(self, '_mic_btn_base_width', None):
+                    self.mic_btn.setFixedWidth(self._mic_btn_base_width)
+            except Exception:
+                pass
 
     def on_save_clicked(self):
         # Placeholder: implement later (export, sending, etc.)
@@ -969,10 +1123,12 @@ class MainWindow(QMainWindow):
             self._recording = False
 
         self._reset_to_new_draft()
+        # Show intro again for a fresh draft
+        self.restart_intro()
 
     def _reset_to_new_draft(self):
-        self.mic_btn.setEnabled(True)
-        self.mic_btn.setText("🎤  Record")
+        # Ensure we are not in processing/recording visuals
+        self._set_mic_processing(False)
         self.mic_btn.setProperty("recording", False)
         self.mic_btn.style().unpolish(self.mic_btn)
         self.mic_btn.style().polish(self.mic_btn)
@@ -981,6 +1137,27 @@ class MainWindow(QMainWindow):
         # Reset application state and UI
         self.state = initial_state()
         self.refresh_view()
+
+    # ---- Intro control ----
+    def restart_intro(self):
+        """Re-enable the intro overlay and restart the typing cycle."""
+        try:
+            self._intro_dismissed = False
+            if hasattr(self, '_intro_label') and self._intro_label is not None:
+                self._intro_label.show()
+                # Reset typing cycle
+                if hasattr(self, '_typing_timer') and self._typing_timer is not None:
+                    self._typing_timer.stop()
+                if hasattr(self, '_hold_timer') and self._hold_timer is not None:
+                    self._hold_timer.stop()
+                self._intro_index = 0
+                self._typed_pos = 0
+                self._start_typing_cycle()
+            else:
+                # Not initialized yet; set up fresh
+                self._setup_intro_overlay()
+        except Exception:
+            pass
 
     # ---- Graceful shutdown on app close ----
     def closeEvent(self, event):
@@ -1004,12 +1181,27 @@ class MainWindow(QMainWindow):
                     self._worker_thread.wait(3000)
                 except Exception:
                     pass
+                # Fallback: forcefully terminate if still alive (last resort)
+                try:
+                    if self._worker_thread.isRunning():
+                        self._worker_thread.terminate()
+                        self._worker_thread.wait(1000)
+                except Exception:
+                    pass
         finally:
             # Ensure audio resources are released
             try:
                 self.recorder.shutdown()
             except Exception:
                 pass
+            # Stop app-level timers to avoid late events on shutdown
+            for name in ("_typing_timer", "_hold_timer", "_new_tip_timer"):
+                try:
+                    t = getattr(self, name, None)
+                    if t:
+                        t.stop()
+                except Exception:
+                    pass
         super().closeEvent(event)
 
     # ------- View Binding -------
