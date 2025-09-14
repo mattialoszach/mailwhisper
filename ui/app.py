@@ -891,6 +891,10 @@ class MainWindow(QMainWindow):
             }
             QWidget#card { background: #ffffff; border: 1px solid #e6e6e6; border-radius: 10px; }
             QLineEdit, QPlainTextEdit, QTextEdit { background: #fff; border: 1px solid #e6e6e6; border-radius: 8px; padding: 8px 10px; font-size: 14px; color: #1f2937; }
+            QLineEdit[changed="true"], QPlainTextEdit[changed="true"], QTextEdit[changed="true"] {
+                background: #FFF7ED; /* amber tint */
+                border-color: #f59e0b;
+            }
             /* Body text styled like the input fields */
             QLabel#bodyText {
                 background: #fff;
@@ -1301,9 +1305,30 @@ class MainWindow(QMainWindow):
         self._worker_thread.start()
 
     def on_patch_ready(self, patch: Dict[str, Any]):
-        # Update state
+        # Diff old vs. new to highlight changed fields
+        old = dict(self.state)
         self.state.update(patch or {})
         self.refresh_view()
+        try:
+            changed = []
+            if 'to' in (patch or {}):
+                if (old.get('to') or []) != (self.state.get('to') or []):
+                    changed.append('to')
+            if 'cc' in (patch or {}):
+                if (old.get('cc') or []) != (self.state.get('cc') or []):
+                    changed.append('cc')
+            if 'subject' in (patch or {}):
+                if (old.get('subject') or '') != (self.state.get('subject') or ''):
+                    changed.append('subject')
+            if 'tone' in (patch or {}):
+                if (old.get('tone') or '') != (self.state.get('tone') or ''):
+                    changed.append('tone')
+            if 'body' in (patch or {}):
+                if (old.get('body') or '') != (self.state.get('body') or ''):
+                    changed.append('body')
+            self._flash_changed(changed)
+        except Exception:
+            pass
         self._set_mic_processing(False)
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
@@ -1317,6 +1342,35 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
         self.show_toast(f"Processing failed: {msg}", kind="error")
+
+    def _flash_changed(self, fields: list[str], duration_ms: int = 1000):
+        # Map field name -> editor widget
+        mapping = {
+            'to': getattr(self.card_to, 'editor', None),
+            'cc': getattr(self.card_cc, 'editor', None),
+            'subject': getattr(self.card_subject, 'editor', None),
+            'tone': getattr(self.card_tone, 'editor', None),
+            'body': getattr(self.card_body, 'editor', None),
+        }
+        for f in fields or []:
+            w = mapping.get(f)
+            if not w:
+                continue
+            try:
+                w.setProperty('changed', True)
+                w.style().unpolish(w)
+                w.style().polish(w)
+                QTimer.singleShot(max(200, duration_ms), lambda w=w: self._clear_changed(w))
+            except Exception:
+                pass
+
+    def _clear_changed(self, w: QWidget):
+        try:
+            w.setProperty('changed', False)
+            w.style().unpolish(w)
+            w.style().polish(w)
+        except Exception:
+            pass
 
     def _on_thread_finished(self):
         # Drop references so GC can clean up
