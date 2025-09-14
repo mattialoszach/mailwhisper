@@ -1,7 +1,7 @@
 import sys
 from typing import Dict, Any
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, QPropertyAnimation
-from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, QPropertyAnimation, QPoint
+from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QPainterPath, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
 QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 QLineEdit, QPlainTextEdit, QTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
@@ -81,7 +81,9 @@ class FieldCard(QWidget):
 
         self.copy_btn = QPushButton()
         self.copy_btn.setObjectName("copyBtn")
-        self.copy_btn.setToolTip("Copy")
+        # Use custom SoftToolTip; keep native tooltip empty
+        self.copy_btn.setToolTip("")
+        self.copy_btn.setProperty("softTip", "Copy")
         self._copy_icon = QIcon("ui/icons/copy.svg")
         self._check_icon = QIcon("ui/icons/check.svg")
         self.copy_btn.setIcon(self._copy_icon)
@@ -111,6 +113,12 @@ class FieldCard(QWidget):
 
         # Connect copy interaction
         self.copy_btn.clicked.connect(self._on_copy_clicked)
+        # Install custom tooltip behavior for the copy button
+        self.copy_btn.installEventFilter(self)
+        self._tip_timer = QTimer(self)
+        self._tip_timer.setSingleShot(True)
+        self._tip_timer.timeout.connect(self._show_copy_tip)
+        self._soft_tip = SoftToolTip(self)
 
     def set_text(self, text: str):
         e = self.editor
@@ -140,12 +148,30 @@ class FieldCard(QWidget):
         QApplication.clipboard().setText(self.text())
         # Feedback: swap icon to check for 1.5s
         self.copy_btn.setIcon(self._check_icon)
-        self.copy_btn.setToolTip("Copied!")
+        self.copy_btn.setProperty("softTip", "Copied!")
         QTimer.singleShot(1500, self._restore_copy_icon)
 
     def _restore_copy_icon(self):
         self.copy_btn.setIcon(self._copy_icon)
-        self.copy_btn.setToolTip("Copy")
+        self.copy_btn.setProperty("softTip", "Copy")
+
+    # ---- Soft tooltip helpers for copy button ----
+    def _show_copy_tip(self):
+        try:
+            text = self.copy_btn.property("softTip") or "Copy"
+            self._soft_tip.setText(text)
+            self._soft_tip.showNear(self.copy_btn, above=True, y_offset=10)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is self.copy_btn:
+            if event.type() == QEvent.Enter:
+                self._tip_timer.start(600)
+            elif event.type() in (QEvent.Leave, QEvent.MouseButtonPress):
+                self._tip_timer.stop()
+                self._soft_tip.hide()
+        return super().eventFilter(obj, event)
 
 
 class AutoResizingPlainTextEdit(QPlainTextEdit):
@@ -277,7 +303,57 @@ class AutoWrapLabel(QLabel):
         h = max(60, h_text)
         self.setMinimumHeight(h)
         self.setMaximumHeight(h)
+
+
+class SoftToolTip(QWidget):
+    """A lightweight, custom tooltip to avoid native borders/shadows."""
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        # Enable transparent corners so rounded shape is visible
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._radius = 6
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        self._label = QLabel("")
+        self._label.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._label)
+        # Background is painted manually for crisp rounded corners; only text color via QSS
+        self.setStyleSheet("color: #1f2937; background: #ffffff;")
+
+    def setText(self, text: str):
+        self._label.setText(text or "")
+        self.adjustSize()
+
+    def showNear(self, widget: QWidget, above: bool = True, y_offset: int = 8):
+        if not widget:
+            return
+        r = widget.rect()
+        if above:
+            pos = widget.mapToGlobal(QPoint(r.center().x() - self.width() // 2, r.top() - self.height() - y_offset))
+        else:
+            pos = widget.mapToGlobal(QPoint(r.center().x() - self.width() // 2, r.bottom() + y_offset))
+        self.move(pos)
+        self.show()
         self.updateGeometry()
+
+    def paintEvent(self, event):
+        # Paint a rounded white background with transparent outside
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            rect = self.rect().adjusted(0, 0, -1, -1)
+            path = QPainterPath()
+            path.addRoundedRect(rect, self._radius, self._radius)
+            # Fill
+            p.fillPath(path, QBrush(QColor("#ffffff")))
+            # Light gray border
+            pen = QPen(QColor("#e6e6e6"))
+            pen.setWidthF(1.5)
+            p.setPen(pen)
+            p.drawPath(path)
+        finally:
+            p.end()
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -354,6 +430,8 @@ class MainWindow(QMainWindow):
         self.recorder = ButtonControlledRecorder(samplerate=16000, channels=1)
         self._recording = False
         self._worker_thread: QThread | None = None
+        # Intro dismissed flag must exist before any event filters run
+        self._intro_dismissed = False
 
         # Top bar
         top_bar = QHBoxLayout()
@@ -445,11 +523,13 @@ class MainWindow(QMainWindow):
         # New draft button (bottom-left)
         self.new_btn = QToolButton()
         self.new_btn.setObjectName("newBtn")
-        self.new_btn.setToolTip("New Draft")
+        # Use custom tooltip instead of native to avoid dark border
+        self.new_btn.setToolTip("")
         self.new_btn.setFixedSize(40, 40)
         self.new_btn.setIcon(QIcon("ui/icons/badge-plus.svg"))
         self.new_btn.setIconSize(QSize(20, 20))
         self.new_btn.clicked.connect(self.on_new_draft_clicked)
+        self.new_btn.installEventFilter(self)
 
         self.mic_btn = QPushButton("🎤  Record")
         self.mic_btn.setObjectName("micBtn")
@@ -505,12 +585,13 @@ class MainWindow(QMainWindow):
             "Try a tone: friendly, formal, brief",
             "You can refine later — start talking",
         ]
-        self._intro_dismissed = False
         self._setup_intro_overlay()
         # Global event filter: observe button clicks; do not dismiss on outside focus changes
         QApplication.instance().installEventFilter(self)
         # Also watch the scroll viewport for resize so overlay stays perfectly centered
         self.scroll_area.viewport().installEventFilter(self)
+        # Custom tooltip instance
+        self._soft_tip = SoftToolTip(self)
 
     # ------- Styling -------
     def apply_styles(self):
@@ -577,7 +658,8 @@ class MainWindow(QMainWindow):
             QPushButton#copyBtn { padding: 4px; min-width: 32px; min-height: 32px; border-radius: 4px; border: none; background: transparent; color: #6b7280; }
             QPushButton#copyBtn:hover { background: #d9d9d9; color: #1f2937; }
             QPushButton#copyBtn:pressed { background: #cfcfcf; }
-            QToolTip { background: #ffffff; color: #1f2937; border: 1px solid #e6e6e6; border-radius: 8px; padding: 6px 8px; }
+            /* Global tooltip styling (clean, no harsh border) */
+            QToolTip { background: #ffffff; color: #1f2937; border: none; border-radius: 10px; padding: 0px 0px; }
             QPushButton#micBtn {
                 padding: 10px 16px;
                 border-radius: 12px;
@@ -734,13 +816,35 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         # Dismiss only when a button within the app is clicked, not on focus changes
-        if (not self._intro_dismissed and event.type() == QEvent.MouseButtonPress
+        if (not getattr(self, '_intro_dismissed', True) and event.type() == QEvent.MouseButtonPress
             and isinstance(obj, QAbstractButton)):
             self.dismiss_intro()
         # Keep overlay centered when the scroll viewport resizes
         if obj is self.scroll_area.viewport() and event.type() == QEvent.Resize:
             self._sync_intro_geometry()
+        # Custom tooltip handling for New Draft button
+        if obj is getattr(self, 'new_btn', None):
+            if event.type() == QEvent.Enter:
+                # Show after a short delay to mimic native behavior
+                if not hasattr(self, '_new_tip_timer'):
+                    self._new_tip_timer = QTimer(self)
+                    self._new_tip_timer.setSingleShot(True)
+                    self._new_tip_timer.timeout.connect(lambda: self._show_soft_tip("New Draft"))
+                self._new_tip_timer.start(600)
+            elif event.type() in (QEvent.Leave, QEvent.MouseButtonPress):
+                if hasattr(self, '_new_tip_timer'):
+                    self._new_tip_timer.stop()
+                self._soft_tip.hide()
         return super().eventFilter(obj, event)
+
+    def _show_soft_tip(self, text: str):
+        if not self.isActiveWindow():
+            return
+        try:
+            self._soft_tip.setText(text)
+            self._soft_tip.showNear(self.new_btn, above=True, y_offset=10)
+        except Exception:
+            pass
 
     def toggle_recording(self):
         if not self._recording:
@@ -955,6 +1059,12 @@ def main():
     pal.setColor(QPalette.Text, QColor("#1f2937"))
     pal.setColor(QPalette.WindowText, QColor("#1f2937"))
     pal.setColor(QPalette.ButtonText, QColor("#1f2937"))
+    # Ensure tooltips use the same clean palette (avoid dark outlines)
+    try:
+        pal.setColor(QPalette.ToolTipBase, QColor("#ffffff"))
+        pal.setColor(QPalette.ToolTipText, QColor("#1f2937"))
+    except Exception:
+        pass
     app.setPalette(pal)
     win = MainWindow()
     win.show()
