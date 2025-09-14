@@ -9,9 +9,17 @@ from utils.stt_whisper_mem import transcribe_array
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+# Global, mutable model setting configured by the UI (defaults to qwen3:8b)
+GLOBAL_LLM_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+
+def set_llm_model(model: str):
+    """Set preferred Ollama model; used by the UI settings dialog."""
+    global GLOBAL_LLM_MODEL
+    GLOBAL_LLM_MODEL = (model or "qwen3:8b").strip()
+
 # Helpers
 def make_llm():
-    model = "qwen3:8b"
+    model = GLOBAL_LLM_MODEL or "qwen3:8b"
     return ChatOllama(model=model, temperature=0.15, num_ctx=8192)
 
 def make_structured_llm() -> Any:

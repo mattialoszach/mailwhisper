@@ -5,6 +5,14 @@ import os
 
 _MODEL: WhisperModel | None = None
 
+def set_whisper_model(model_name: str):
+    """Select a Whisper model name (e.g., 'base', 'small', 'medium').
+    Resets the cached model; the next transcribe will load it.
+    """
+    global _MODEL
+    os.environ["WHISPER_LOCAL_MODEL"] = (model_name or "medium").strip()
+    _MODEL = None
+
 def load_model() -> WhisperModel:
     global _MODEL
     if _MODEL is not None:

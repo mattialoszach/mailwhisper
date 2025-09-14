@@ -1,17 +1,20 @@
 import sys
+import os
 from typing import Dict, Any
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, QPropertyAnimation, QPoint
 from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QPainterPath, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
 QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 QLineEdit, QPlainTextEdit, QTextEdit, QPushButton, QScrollArea, QFrame, QToolButton,
-QDialog, QDialogButtonBox, QSizePolicy, QAbstractButton
+QDialog, QDialogButtonBox, QSizePolicy, QAbstractButton, QComboBox, QFormLayout, QSpacerItem
 )
+import subprocess
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 import numpy as np
 from agent.state import initial_state, DraftState
 from agent.nodes import intent_node, apply_node
-from utils.stt_whisper_mem import transcribe_array
+from agent import nodes as nodes_mod
+from utils.stt_whisper_mem import transcribe_array, set_whisper_model
 from ui.recorder import ButtonControlledRecorder
 
 class ProcessAudioWorker(QObject):
@@ -415,14 +418,121 @@ class Spinner(QWidget):
             p.end()
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, current_ollama: str = "qwen3:8b", current_whisper: str = "medium"):
         super().__init__(parent)
+        self.setObjectName("settingsDialog")
         self.setWindowTitle("Settings")
+        self.setMinimumSize(520, 420)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Settings (coming soon)"))
-        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        # Section: Prerequisites
+        header_font = QFont()
+        header_font.setWeight(QFont.DemiBold)
+
+        prereq_header = QLabel("Prerequisites")
+        prereq_header.setFont(header_font)
+        layout.addWidget(prereq_header)
+
+        prereq_text = QLabel(
+            "Ollama is required. Install from <a href=\"https://ollama.com\">ollama.com</a>.\n"
+            "You also need to install models locally (e.g., qwen3 family).\n"
+            "Whisper will be downloaded automatically on first use; the initial run may take a bit longer."
+        )
+        prereq_text.setOpenExternalLinks(True)
+        prereq_text.setWordWrap(True)
+        prereq_text.setStyleSheet("color: #6b7280;")
+        layout.addWidget(prereq_text)
+
+        line1 = QFrame()
+        line1.setFrameShape(QFrame.HLine)
+        line1.setFrameShadow(QFrame.Sunken)
+        line1.setStyleSheet("color: #e6e6e6;")
+        layout.addWidget(line1)
+
+        # Ollama model selection
+        ollama_header = QLabel("Ollama Model")
+        ollama_header.setFont(header_font)
+        layout.addWidget(ollama_header)
+        hint1 = QLabel("Recommended: qwen3 family. More parameters → better quality, but slower.")
+        hint1.setStyleSheet("color: #6b7280;")
+        hint1.setWordWrap(True)
+        layout.addWidget(hint1)
+
+        self.cmb_ollama = QComboBox()
+        self.cmb_ollama.setEditable(False)
+        self._populate_ollama_models(current_ollama)
+        layout.addWidget(self.cmb_ollama)
+
+        layout.addSpacing(8)
+
+        # Whisper model selection
+        whisper_header = QLabel("Whisper")
+        whisper_header.setFont(header_font)
+        layout.addWidget(whisper_header)
+        hint2 = QLabel("Medium has many more parameters. Transcriptions are much better, but STT can take longer.")
+        hint2.setStyleSheet("color: #6b7280;")
+        hint2.setWordWrap(True)
+        layout.addWidget(hint2)
+
+        self.cmb_whisper = QComboBox()
+        self.cmb_whisper.addItems(["base", "small", "medium"]) 
+        # set default/current
+        idx = max(0, self.cmb_whisper.findText(current_whisper))
+        self.cmb_whisper.setCurrentIndex(idx if idx >= 0 else 2)
+        layout.addWidget(self.cmb_whisper)
+
+        layout.addStretch(1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+        # Local, minimal styling to match app
+        self.setStyleSheet(
+            """
+            #settingsDialog { background: #ffffff; }
+            QLabel { color: #1f2937; }
+            QComboBox { background: #fff; border: 1px solid #e6e6e6; border-radius: 8px; padding: 6px 10px; color: #1f2937; }
+            QComboBox QAbstractItemView { background: #fff; color: #1f2937; border: 1px solid #e6e6e6; selection-background-color: #ececec; }
+            QDialogButtonBox QPushButton { padding: 8px 14px; border-radius: 10px; background: #f0f0f0; color: #1f2937; border: 1px solid #e6e6e6; }
+            QDialogButtonBox QPushButton:hover { background: #e7e7e7; }
+            QDialogButtonBox QPushButton:default { background: #1f2937; color: #ffffff; border: none; }
+            QFrame { background: transparent; }
+            """
+        )
+
+    def _populate_ollama_models(self, current: str):
+        models = []
+        # Try to call `ollama list` for real models
+        try:
+            proc = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=False)
+            out = proc.stdout or ""
+            for line in out.splitlines():
+                # typical format: name tag size modified
+                parts = line.strip().split()
+                if parts:
+                    name = parts[0]
+                    if name != "NAME":
+                        models.append(name)
+        except Exception:
+            pass
+        # Fallback curated list
+        if not models:
+            models = [
+                "qwen3:8b", "qwen3:14b", "qwen2.5:7b", "qwen2.5:14b",
+                "llama3.1:8b", "llama3.1:70b", "phi3:3.8b", "mistral:7b"
+            ]
+        # Fill combobox
+        self.cmb_ollama.clear()
+        self.cmb_ollama.addItems(models)
+        # Select current/default
+        idx = self.cmb_ollama.findText(current)
+        if idx < 0:
+            idx = max(0, self.cmb_ollama.findText("qwen3:8b"))
+        self.cmb_ollama.setCurrentIndex(idx if idx >= 0 else 0)
 
 
 class CircleButton(QToolButton):
@@ -803,8 +913,25 @@ class MainWindow(QMainWindow):
 
     # ------- UI Actions -------
     def show_settings(self):
-        dlg = SettingsDialog(self)
-        dlg.exec()
+        # Current selections come from module settings/env
+        try:
+            curr_ollama = getattr(nodes_mod, 'GLOBAL_LLM_MODEL', 'qwen3:8b')
+        except Exception:
+            curr_ollama = 'qwen3:8b'
+        curr_whisper = os.getenv('WHISPER_LOCAL_MODEL', 'medium')
+        dlg = SettingsDialog(self, current_ollama=curr_ollama, current_whisper=curr_whisper)
+        if dlg.exec() == QDialog.Accepted:
+            selected_ollama = dlg.cmb_ollama.currentText().strip()
+            selected_whisper = dlg.cmb_whisper.currentText().strip()
+            # Apply runtime settings
+            try:
+                nodes_mod.set_llm_model(selected_ollama)
+            except Exception:
+                pass
+            try:
+                set_whisper_model(selected_whisper)
+            except Exception:
+                pass
 
     def _on_space_pressed(self):
         # Respect disabled state while processing
