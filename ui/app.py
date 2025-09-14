@@ -17,6 +17,15 @@ from agent import nodes as nodes_mod
 from utils.stt_whisper_mem import transcribe_array, set_whisper_model
 from ui.recorder import ButtonControlledRecorder
 
+def resource_path(rel: str) -> str:
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, rel)
+    # fallback to repo root relative to this file
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    return os.path.join(root, rel)
+
 class ProcessAudioWorker(QObject):
     finished = Signal(dict) # emits patch for state update
     failed = Signal(str)
@@ -87,8 +96,8 @@ class FieldCard(QWidget):
         # Use custom SoftToolTip; keep native tooltip empty
         self.copy_btn.setToolTip("")
         self.copy_btn.setProperty("softTip", "Copy")
-        self._copy_icon = QIcon("ui/icons/copy.svg")
-        self._check_icon = QIcon("ui/icons/check.svg")
+        self._copy_icon = QIcon(resource_path("ui/icons/copy.svg"))
+        self._check_icon = QIcon(resource_path("ui/icons/check.svg"))
         self.copy_btn.setIcon(self._copy_icon)
         self.copy_btn.setIconSize(QSize(18, 18))
         self.copy_btn.setText("")
@@ -712,7 +721,7 @@ class MainWindow(QMainWindow):
         self.menu_btn = QToolButton()
         self.menu_btn.setObjectName("menuBtn")
         self.menu_btn.setFixedSize(40, 40)
-        self.menu_btn.setIcon(QIcon("ui/icons/menu.svg"))
+        self.menu_btn.setIcon(QIcon(resource_path("ui/icons/menu.svg")))
         self.menu_btn.setIconSize(QSize(22, 22))
         self.menu_btn.setText("")
         top_bar.addWidget(self.menu_btn, alignment=Qt.AlignLeft)
@@ -730,7 +739,7 @@ class MainWindow(QMainWindow):
         self.settings_btn = QToolButton()
         self.settings_btn.setObjectName("settingsBtn")
         self.settings_btn.setFixedSize(40, 40)
-        self.settings_btn.setIcon(QIcon("ui/icons/settings.svg"))
+        self.settings_btn.setIcon(QIcon(resource_path("ui/icons/settings.svg")))
         self.settings_btn.setIconSize(QSize(22, 22))
         self.settings_btn.setText("")
         self.settings_btn.clicked.connect(self.show_settings)
@@ -779,7 +788,7 @@ class MainWindow(QMainWindow):
         # Use custom tooltip instead of native to avoid dark border
         self.new_btn.setToolTip("")
         self.new_btn.setFixedSize(40, 40)
-        self.new_btn.setIcon(QIcon("ui/icons/badge-plus.svg"))
+        self.new_btn.setIcon(QIcon(resource_path("ui/icons/badge-plus.svg")))
         self.new_btn.setIconSize(QSize(20, 20))
         self.new_btn.clicked.connect(self.on_new_draft_clicked)
         self.new_btn.installEventFilter(self)

@@ -33,4 +33,10 @@ def chat_session():
         print("\n—————————————————————————————————————")
 
 if __name__ == "__main__":
+    # Ensure PyInstaller multiprocessing children don't relaunch the GUI
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()
+    except Exception:
+        pass
     main()
