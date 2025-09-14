@@ -417,6 +417,90 @@ class Spinner(QWidget):
         finally:
             p.end()
 
+
+class Toast(QWidget):
+    """Small, auto-dismissing toast shown in the top-right corner."""
+    closed = Signal(object)
+
+    def __init__(self, text: str, kind: str = "info", duration_ms: int = 3000, parent: QWidget | None = None):
+        # Child widget inside our toast area; no top-level tooltip window
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._radius = 10
+        self._duration = max(1200, int(duration_ms))
+        # Colors
+        self._bg = QColor("#ffffff")
+        self._fg = QColor("#1f2937")
+        self._border = QColor("#e6e6e6")
+        # Accent + lightly tinted backgrounds
+        if kind in ("info", "warning"):
+            self._accent = QColor("#f59e0b")  # orange
+            self._bg = QColor("#FFF7ED")     # light orange tint
+        elif kind == "success":
+            self._accent = QColor("#22c55e")  # green
+            self._bg = QColor("#ECFDF5")      # light green tint
+        elif kind == "error":
+            self._accent = QColor("#ef4444")  # red
+            self._bg = QColor("#FEF2F2")      # light red tint
+        else:
+            self._accent = QColor("#9ca3af")  # gray fallback
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(8)
+        self._label = QLabel(text)
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet("color: #1f2937;")
+        lay.addWidget(self._label)
+
+        self._fx = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._fx)
+        self._fx.setOpacity(0.0)
+        self._fade = QPropertyAnimation(self._fx, b"opacity", self)
+        self._fade.setDuration(180)
+
+        # Auto dismiss timers
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.timeout.connect(self._fade_out)
+
+    def show_with_fade(self):
+        self.adjustSize()
+        self._fade.stop()
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self.show()
+        self._hold.start(self._duration)
+
+    def _fade_out(self):
+        self._fade.stop()
+        self._fade.setStartValue(self._fx.opacity())
+        self._fade.setEndValue(0.0)
+        self._fade.setDuration(200)
+        def _done():
+            self.closed.emit(self)
+            self.hide()
+            self.deleteLater()
+        self._fade.finished.connect(_done)
+        self._fade.start()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            rect = self.rect().adjusted(0, 0, -1, -1)
+            path = QPainterPath()
+            path.addRoundedRect(rect, self._radius, self._radius)
+            p.fillPath(path, QBrush(self._bg))
+            pen = QPen(self._border)
+            pen.setWidthF(1.0)
+            p.setPen(pen)
+            p.drawPath(path)
+        finally:
+            p.end()
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_ollama: str = "qwen3:8b", current_whisper: str = "medium"):
         super().__init__(parent)
@@ -767,6 +851,16 @@ class MainWindow(QMainWindow):
         # Custom tooltip instance
         self._soft_tip = SoftToolTip(self)
 
+        # Toast area for transient messages (top-right)
+        self._toast_area = QWidget(self)
+        self._toast_area.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._toast_area.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._toast_layout = QVBoxLayout(self._toast_area)
+        self._toast_layout.setContentsMargins(0, 0, 0, 0)
+        self._toast_layout.setSpacing(8)
+        self._toasts: list[Toast] = []
+        self._position_toast_area()
+
     # ------- Styling -------
     def apply_styles(self):
         self.setStyleSheet("""
@@ -1010,11 +1104,23 @@ class MainWindow(QMainWindow):
         # Keep the overlay sized to the center area
         super().resizeEvent(event)
         self._sync_intro_geometry()
+        self._position_toast_area()
 
     def _sync_intro_geometry(self):
         if hasattr(self, "_intro_label") and self._intro_label and not self._intro_dismissed:
             vp = self.scroll_area.viewport()
             self._intro_label.setGeometry(vp.rect())
+
+    def _position_toast_area(self):
+        try:
+            right = 20
+            top = 76  # below top bar
+            width = 360
+            x = max(0, self.width() - right - width)
+            y = top
+            self._toast_area.setGeometry(x, y, width, max(60, self.height() - y - 20))
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         # Dismiss only when the Record button is clicked (not other buttons)
@@ -1049,6 +1155,48 @@ class MainWindow(QMainWindow):
         try:
             self._soft_tip.setText(text)
             self._soft_tip.showNear(self.new_btn, above=True, y_offset=10)
+        except Exception:
+            pass
+
+    # ---- Toast helpers ----
+    def show_toast(self, text: str, kind: str = "info", duration_ms: int = 3000):
+        try:
+            # Only one toast at a time: clear any existing
+            for t in list(self._toasts):
+                try:
+                    t.hide()
+                    t.deleteLater()
+                except Exception:
+                    pass
+            self._toasts.clear()
+            # Remove any leftover layout items
+            try:
+                while self._toast_layout.count():
+                    item = self._toast_layout.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+            except Exception:
+                pass
+
+            t = Toast(text, kind=kind, duration_ms=duration_ms, parent=self._toast_area)
+            t.closed.connect(self._remove_toast)
+            self._toast_layout.addWidget(t, 0, Qt.AlignRight | Qt.AlignTop)
+            self._toasts.append(t)
+            t.show_with_fade()
+        except Exception:
+            pass
+
+    def _remove_toast(self, toast: Toast):
+        try:
+            if toast in self._toasts:
+                self._toasts.remove(toast)
+            # Also remove from layout to avoid stacking gaps
+            for i in reversed(range(self._toast_layout.count())):
+                item = self._toast_layout.itemAt(i)
+                if item and item.widget() is toast:
+                    self._toast_layout.takeAt(i)
+                    break
         except Exception:
             pass
 
@@ -1112,6 +1260,7 @@ class MainWindow(QMainWindow):
                 print(f"Audio error: {e}", file=sys.stderr)
                 if hasattr(self, 'new_btn'):
                     self.new_btn.setEnabled(True)
+                self.show_toast("Audio error — see console for details", kind="error")
         else:
             # Stop and process
             self._recording = False
@@ -1124,6 +1273,7 @@ class MainWindow(QMainWindow):
                 audio = self.recorder.stop()
             except Exception as e:
                 print(f"Stop error: {e}", file=sys.stderr)
+                self.show_toast("Audio stop error", kind="error")
                 return
 
             # Worker thread for transcription + LLM
@@ -1157,12 +1307,16 @@ class MainWindow(QMainWindow):
         self._set_mic_processing(False)
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
+        # Notify if nothing came back (e.g., cancelled)
+        if not patch:
+            self.show_toast("Cancelled", kind="info", duration_ms=1800)
 
     def on_processing_failed(self, msg: str):
         print(f"Processing failed: {msg}", file=sys.stderr)
         self._set_mic_processing(False)
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
+        self.show_toast(f"Processing failed: {msg}", kind="error")
 
     def _on_thread_finished(self):
         # Drop references so GC can clean up
@@ -1217,6 +1371,7 @@ class MainWindow(QMainWindow):
         # Placeholder: implement later (export, sending, etc.)
         self.state["done"] = True
         print("Save clicked — state marked as done.")
+        self.show_toast("Saved", kind="success")
 
     def on_new_draft_clicked(self):
         """Reset the UI to a fresh DraftState and restore recording UI."""
@@ -1252,6 +1407,7 @@ class MainWindow(QMainWindow):
         self._reset_to_new_draft()
         # Show intro again for a fresh draft
         self.restart_intro()
+        self.show_toast("New draft", kind="info", duration_ms=1500)
 
     def _reset_to_new_draft(self):
         # Ensure we are not in processing/recording visuals
