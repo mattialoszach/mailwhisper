@@ -22,13 +22,24 @@ class ButtonControlledRecorder:
             return
         self._running = True
         self._chunks.clear()
-        self._stream = sd.InputStream(
-            samplerate=self.samplerate,
-            channels=self.channels,
-            callback=self._audio_cb,
-            dtype="float32",
-        )
-        self._stream.start()
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self.samplerate,
+                channels=self.channels,
+                callback=self._audio_cb,
+                dtype="float32",
+            )
+            self._stream.start()
+        except Exception:
+            self._running = False
+            try:
+                if self._stream:
+                    self._stream.close()
+            except Exception:
+                pass
+            finally:
+                self._stream = None
+            raise
         # Background thread collects frames
         def pump():
             while self._running:

@@ -1,3 +1,12 @@
+# Ensure multiprocessing uses 'fork' on macOS to avoid named semaphore tracking.
+# Must be set early, before libraries import multiprocessing.synchronize.
+try:
+    import multiprocessing as _mp
+    _mp.set_start_method("fork", force=False)
+    _mp.freeze_support()
+except Exception:
+    pass
+
 from agent.state import initial_state
 from agent.graph import build_graph
 from ui.app import main
@@ -33,10 +42,4 @@ def chat_session():
         print("\n—————————————————————————————————————")
 
 if __name__ == "__main__":
-    # Ensure PyInstaller multiprocessing children don't relaunch the GUI
-    try:
-        import multiprocessing as _mp
-        _mp.freeze_support()
-    except Exception:
-        pass
     main()
