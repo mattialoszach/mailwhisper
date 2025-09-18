@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 from typing import Dict, Any
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer, QEvent, QPropertyAnimation, QPoint
 from PySide6.QtGui import QFont, QAction, QPalette, QColor, QIcon, QTextOption, QPainter, QPen, QBrush, QPainterPath, QShortcut, QKeySequence
@@ -691,6 +692,7 @@ class MainWindow(QMainWindow):
         self.state: DraftState = initial_state()
         self.recorder = ButtonControlledRecorder(samplerate=16000, channels=1)
         self._recording = False
+        self._processing = False
         self._worker_thread: QThread | None = None
         # Intro dismissed flag must exist before any event filters run
         self._intro_dismissed = False
@@ -837,6 +839,8 @@ class MainWindow(QMainWindow):
 
         self.apply_styles()
         self.refresh_view()
+        # Enable editing when idle by default
+        self._update_editor_editable_state()
 
         # Keyboard shortcut: Space toggles recording (start/stop)
         self._space_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
@@ -1254,11 +1258,18 @@ class MainWindow(QMainWindow):
     def toggle_recording(self):
         if not self._recording:
             # Start
+            # Persist any manual edits into state before starting
+            try:
+                self._commit_editor_state_to_state()
+            except Exception:
+                pass
             self._recording = True
             self.mic_btn.setText("⏹  Stop")
             self.mic_btn.setProperty("recording", True)
             self.mic_btn.style().unpolish(self.mic_btn)
             self.mic_btn.style().polish(self.mic_btn)
+            # Disable editing while recording
+            self._update_editor_editable_state()
             # Avoid resetting while recording
             if hasattr(self, 'new_btn'):
                 self.new_btn.setEnabled(False)
@@ -1270,6 +1281,11 @@ class MainWindow(QMainWindow):
                 self.mic_btn.setProperty("recording", False)
                 self.mic_btn.style().unpolish(self.mic_btn)
                 self.mic_btn.style().polish(self.mic_btn)
+                # Re-enable editing since start failed
+                try:
+                    self._update_editor_editable_state()
+                except Exception:
+                    pass
                 print(f"Audio error: {e}", file=sys.stderr)
                 if hasattr(self, 'new_btn'):
                     self.new_btn.setEnabled(True)
@@ -1281,6 +1297,8 @@ class MainWindow(QMainWindow):
             self.mic_btn.setProperty("recording", False)
             self.mic_btn.style().unpolish(self.mic_btn)
             self.mic_btn.style().polish(self.mic_btn)
+            # Still disabled while processing will be true
+            self._update_editor_editable_state()
 
             try:
                 audio = self.recorder.stop()
@@ -1339,6 +1357,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._set_mic_processing(False)
+        # Re-enable editing when idle
+        self._update_editor_editable_state()
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
         # Notify if nothing came back (e.g., cancelled)
@@ -1348,6 +1368,8 @@ class MainWindow(QMainWindow):
     def on_processing_failed(self, msg: str):
         print(f"Processing failed: {msg}", file=sys.stderr)
         self._set_mic_processing(False)
+        # Re-enable editing when idle
+        self._update_editor_editable_state()
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(True)
         self.show_toast(f"Processing failed: {msg}", kind="error")
@@ -1392,6 +1414,7 @@ class MainWindow(QMainWindow):
 
     def _set_mic_processing(self, on: bool):
         if on:
+            self._processing = True
             self.mic_btn.setEnabled(False)
             # Text moved into overlay for perfect centering
             self.mic_btn.setText("")
@@ -1414,6 +1437,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         else:
+            self._processing = False
             if self._mic_spinner:
                 self._mic_spinner.stop()
             if self._proc_container:
@@ -1429,8 +1453,18 @@ class MainWindow(QMainWindow):
                     self.mic_btn.setFixedWidth(self._mic_btn_base_width)
             except Exception:
                 pass
+        # Keep editors disabled while recording/processing, else enable
+        try:
+            self._update_editor_editable_state()
+        except Exception:
+            pass
 
     def on_save_clicked(self):
+        # Persist any manual edits as part of save
+        try:
+            self._commit_editor_state_to_state()
+        except Exception:
+            pass
         # Placeholder: implement later (export, sending, etc.)
         self.state["done"] = True
         print("Save clicked — state marked as done.")
@@ -1483,6 +1517,62 @@ class MainWindow(QMainWindow):
         # Reset application state and UI
         self.state = initial_state()
         self.refresh_view()
+        # After reset, allow editing (idle)
+        self._update_editor_editable_state()
+
+    # ---- Editing controls ----
+    def _update_editor_editable_state(self):
+        """Enable editing when not recording or processing; otherwise read-only."""
+        editable = (not getattr(self, '_recording', False)) and (not getattr(self, '_processing', False))
+        try:
+            editors = [
+                getattr(self.card_to, 'editor', None),
+                getattr(self.card_cc, 'editor', None),
+                getattr(self.card_subject, 'editor', None),
+                getattr(self.card_tone, 'editor', None),
+                getattr(self.card_body, 'editor', None),
+            ]
+            for e in editors:
+                if not e:
+                    continue
+                try:
+                    if hasattr(e, 'setReadOnly'):
+                        e.setReadOnly(not editable)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _commit_editor_state_to_state(self):
+        """Read current editor values and store them in self.state for the graph."""
+        # to/cc: split by commas/semicolons/whitespace, remove empties
+        def parse_recipients(text: str) -> list[str]:
+            if not isinstance(text, str):
+                return []
+            parts = [p.strip() for p in re.split(r'[;,\s]+', text) if p.strip()]
+            # keep order, simple de-dup
+            deduped = list(dict.fromkeys(parts))
+            return deduped
+
+        try:
+            to_text = self.card_to.text()
+            cc_text = self.card_cc.text()
+            subject = (self.card_subject.text() or "").strip()
+            tone = (self.card_tone.text() or "").strip() or "neutral"
+            body = (self.card_body.text() or "").strip()
+        except Exception:
+            # Fallback if any card missing
+            to_text = ''
+            cc_text = ''
+            subject = (self.state.get('subject') or '').strip()
+            tone = (self.state.get('tone') or 'neutral').strip() or 'neutral'
+            body = (self.state.get('body') or '').strip()
+
+        self.state['to'] = parse_recipients(to_text)
+        self.state['cc'] = parse_recipients(cc_text)
+        self.state['subject'] = subject
+        self.state['tone'] = tone
+        self.state['body'] = body
 
     # ---- Intro control ----
     def restart_intro(self):
