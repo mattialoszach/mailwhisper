@@ -25,10 +25,6 @@ MailWhisper is an Email Draft Agent that works with you to craft the perfect ema
 - Model choices in-app: pick the Ollama model and Whisper size from Settings.
 - Private by design: no content leaves your machine; models are fully local.
 
-## 🎥 Quick Live Demo
-
-<video src="demo/demo-video.mp4" controls width="700"></video>
-
 ## 🛠️ Setup & Run
 This repo uses [uv](https://github.com/astral-sh/uv) for Python environments & dependency management.
 
@@ -125,6 +121,9 @@ Dev note (graph image):
 - Pick a tone up front: “Formal tone” leads to formal greeting/farewell.
 - Provide recipients and subject when you have them; otherwise use placeholders.
 - Iterate: it’s designed to refine, not one-shot.
+
+## 🎥 Live Demo
+<img src="img/demo.gif" width="700">
 
 ## 🔧 Troubleshooting
 - “Audio error” on record:
