@@ -15,6 +15,9 @@ MailWhisper is an Email Draft Agent that works with you to craft the perfect ema
 > MailWhisper is designed and tested primarily on macOS. The UI is macOS‑styled and the packaged .app targets macOS. The Python/uv workflow may run on other platforms, but is not the primary target. However, only using the Backend should work on most other systems perfectly. You can just use the appropriate functions in the main.py file to switch to the CLI Mode.
 
 ## 🚀 Quick Overview
+
+<img src="img/img1.png" alt="MailWhisper" width="600">
+
 - Local STT: transcribe your voice to text with faster-whisper.
 - Local LLM: use an Ollama model (tested with the qwen3 family).
 - Structured edits: your instructions become targeted state updates (subject, tone, recipients, body).
@@ -72,6 +75,9 @@ uv run pyinstaller --clean mailwhisper.spec
 > - Whisper: “medium” transcribes more accurately than “small/base” but takes longer.
 
 ## 💡 Using MailWhisper
+
+<img src="img/img2.png" alt="MailWhisper" width="600">
+
 - Start recording (button or Spacebar), describe the email you need.
 - The app drafts the email and fills:
   - To / Cc (only if you ask for it—never invented)
