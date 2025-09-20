@@ -77,6 +77,21 @@ class ProcessAudioWorker(QObject):
         except Exception as e:
             self.failed.emit(str(e))
 
+class StopAudioWorker(QObject):
+    finished = Signal(object)  # emits recorded audio ndarray
+    failed = Signal(str)
+
+    def __init__(self, recorder: ButtonControlledRecorder):
+        super().__init__()
+        self._rec = recorder
+
+    def run(self):
+        try:
+            audio = self._rec.stop()
+            self.finished.emit(audio)
+        except Exception as e:
+            self.failed.emit(str(e))
+
 class FieldCard(QWidget):
     def __init__(self, title: str, multiline: bool = False, parent=None):
         super().__init__(parent)
@@ -168,7 +183,7 @@ class FieldCard(QWidget):
         self.copy_btn.setIcon(self._copy_icon)
         self.copy_btn.setProperty("softTip", "Copy")
 
-    # ---- Soft tooltip helpers for copy button ----
+    # Soft tooltip helpers for copy button
     def _show_copy_tip(self):
         try:
             text = self.copy_btn.property("softTip") or "Copy"
@@ -381,7 +396,7 @@ class Spinner(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.setInterval(16)  # ~60 FPS for smoothness
+        self._timer.setInterval(33)  # ~30 FPS is smoother and lighter
 
     def start(self):
         if not self._timer.isActive():
@@ -874,7 +889,7 @@ class MainWindow(QMainWindow):
         self._toasts: list[Toast] = []
         self._position_toast_area()
 
-    # ------- Styling -------
+    # Styling
     def apply_styles(self):
         self.setStyleSheet("""
             QMainWindow { background: transparent; }
@@ -982,7 +997,7 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    # ---- Frameless window helpers ----
+    # Frameless window helpers
     def _toggle_max_restore(self):
         if self.isMaximized():
             self.showNormal()
@@ -1022,7 +1037,7 @@ class MainWindow(QMainWindow):
         self._drag_offset = None
         super().mouseReleaseEvent(event)
 
-    # ------- UI Actions -------
+    # UI Actions
     def show_settings(self):
         # Current selections come from module settings/env
         try:
@@ -1051,7 +1066,7 @@ class MainWindow(QMainWindow):
         self.dismiss_intro()
         self.toggle_recording()
 
-    # ----- Intro overlay helpers -----
+    # Intro overlay helpers
     def _setup_intro_overlay(self):
         if self._intro_dismissed:
             return
@@ -1299,16 +1314,32 @@ class MainWindow(QMainWindow):
             self.mic_btn.style().polish(self.mic_btn)
             # Still disabled while processing will be true
             self._update_editor_editable_state()
-
-            try:
-                audio = self.recorder.stop()
-            except Exception as e:
-                print(f"Stop error: {e}", file=sys.stderr)
-                self.show_toast("Audio stop error", kind="error")
-                return
-
-            # Worker thread for transcription + LLM
-            self.run_processing_worker(audio)
+            # Stop the audio stream in a background thread to avoid UI hangs on macOS CoreAudio
+            self._set_mic_processing(True)
+            self._stop_thread = QThread(self)
+            self._stop_worker = StopAudioWorker(self.recorder)
+            self._stop_worker.moveToThread(self._stop_thread)
+            self._stop_thread.started.connect(self._stop_worker.run)
+            # On stop finished, continue with processing
+            self._stop_worker.finished.connect(self._on_audio_stopped)
+            self._stop_worker.failed.connect(self._on_stop_failed)
+            # Cleanup
+            self._stop_worker.finished.connect(self._stop_thread.quit)
+            self._stop_worker.finished.connect(self._stop_worker.deleteLater)
+            self._stop_worker.failed.connect(self._stop_thread.quit)
+            self._stop_worker.failed.connect(self._stop_worker.deleteLater)
+            def _cleanup_stop():
+                try:
+                    self._stop_thread.deleteLater()
+                except Exception:
+                    pass
+                self._stop_thread = None
+                self._stop_worker = None
+            self._stop_thread.finished.connect(_cleanup_stop)
+            # Prevent starting a new draft during stopping
+            if hasattr(self, 'new_btn'):
+                self.new_btn.setEnabled(False)
+            self._stop_thread.start()
 
     def run_processing_worker(self, audio: np.ndarray):
         # Button enters processing state and becomes disabled
@@ -1330,6 +1361,27 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'new_btn'):
             self.new_btn.setEnabled(False)
         self._worker_thread.start()
+
+    def _on_audio_stopped(self, audio: object):
+        try:
+            arr = audio if isinstance(audio, np.ndarray) else np.array(audio, dtype=np.float32)
+        except Exception:
+            arr = np.zeros((0, 1), dtype=np.float32)
+        if arr.size == 0:
+            self._set_mic_processing(False)
+            self.show_toast("No audio recorded.", kind="warning")
+            if hasattr(self, 'new_btn'):
+                self.new_btn.setEnabled(True)
+            return
+        # Chain into processing worker
+        self.run_processing_worker(arr)
+
+    def _on_stop_failed(self, msg: str):
+        print(f"Audio stop error: {msg}", file=sys.stderr)
+        self._set_mic_processing(False)
+        if hasattr(self, 'new_btn'):
+            self.new_btn.setEnabled(True)
+        self.show_toast("Audio stop error", kind="error")
 
     def on_patch_ready(self, patch: Dict[str, Any]):
         # Diff old vs. new to highlight changed fields
@@ -1520,7 +1572,7 @@ class MainWindow(QMainWindow):
         # After reset, allow editing (idle)
         self._update_editor_editable_state()
 
-    # ---- Editing controls ----
+    # Editing controls
     def _update_editor_editable_state(self):
         """Enable editing when not recording or processing; otherwise read-only."""
         editable = (not getattr(self, '_recording', False)) and (not getattr(self, '_processing', False))
@@ -1574,7 +1626,7 @@ class MainWindow(QMainWindow):
         self.state['tone'] = tone
         self.state['body'] = body
 
-    # ---- Intro control ----
+    # Intro control
     def restart_intro(self):
         """Re-enable the intro overlay and restart the typing cycle."""
         try:
@@ -1595,7 +1647,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ---- Graceful shutdown on app close ----
+    # Graceful shutdown on app close
     def closeEvent(self, event):
         try:
             # Cancel running worker if any
@@ -1640,7 +1692,7 @@ class MainWindow(QMainWindow):
                     pass
         super().closeEvent(event)
 
-    # ------- View Binding -------
+    # View Binding
     def refresh_view(self):
         # to
         tos = self.state.get("to", []) or []
