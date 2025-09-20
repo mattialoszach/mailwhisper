@@ -21,6 +21,7 @@ def print_state(state):
     print("Body:\n" + (state.get("body", "(empty)") or "(empty)"))
     print("—————————————————————————————————————\n")
 
+# CLI-Mode
 def chat_session():
     app = build_graph()
 
@@ -42,4 +43,5 @@ def chat_session():
         print("\n—————————————————————————————————————")
 
 if __name__ == "__main__":
+    # UI-Mode
     main()
